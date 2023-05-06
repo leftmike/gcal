@@ -7,12 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/pflag"
 	"google.golang.org/api/calendar/v3"
-)
-
-const (
-	timeFormat = "02 Jan 2006 15:04 MST"
 )
 
 func toDay(t time.Time) time.Time {
@@ -75,20 +72,80 @@ func parseTime(s string) time.Time {
 	return t
 }
 
-func attendeeNames(owner, domain string, attendees []*calendar.EventAttendee) []string {
+func attendeeNames(domain string, attendees []*calendar.EventAttendee) (string, []string) {
 	var names []string
+	var organizer string
 	for _, attendee := range attendees {
 		splits := strings.SplitN(attendee.Email, "@", 2)
 		if splits[1] == domain {
-			if splits[0] != owner {
+			if attendee.Organizer {
+				organizer = splits[0]
+			} else {
 				names = append(names, splits[0])
 			}
 		} else {
-			names = append(names, attendee.Email)
+			if attendee.Organizer {
+				organizer = attendee.Email
+			} else {
+				names = append(names, attendee.Email)
+			}
 		}
 	}
 
-	return names
+	return organizer, names
+}
+
+func truncate(s string, w int) string {
+	sl := len(s)
+	if sl <= w {
+		return s
+	}
+
+	return s[0:w-3] + "..."
+}
+
+func removeString(slice []string, s string) ([]string, bool) {
+	for sdx := range slice {
+		if slice[sdx] == s {
+			return append(slice[:sdx], slice[sdx+1:]...), true
+		}
+	}
+
+	return slice, false
+}
+
+func truncateParticipants(cnt int, names []string) string {
+	participants := fmt.Sprintf("%s + %d other", strings.Join(names[:cnt], " "), len(names)-cnt)
+	if cnt+1 < len(names) {
+		participants += "s"
+	}
+
+	return participants
+}
+
+func formatParticipants(owner string, names []string, wid int) string {
+	names, found := removeString(names, owner)
+	if found {
+		names = append([]string{owner}, names...)
+	}
+
+	participants := strings.Join(names, " ")
+	if len(participants) <= wid {
+		return participants
+	}
+
+	cnt := 1
+	for {
+		participants = truncateParticipants(cnt, names)
+		if len(participants) > wid {
+			cnt -= 1
+			break
+		}
+
+		cnt += 1
+	}
+
+	return truncateParticipants(cnt, names)
 }
 
 func listEvents(fs *pflag.FlagSet, parse func() (args []string, usage func())) {
@@ -116,7 +173,8 @@ func listEvents(fs *pflag.FlagSet, parse func() (args []string, usage func())) {
 	}
 	to = to.Add(time.Hour*24 - time.Second)
 
-	fmt.Printf("%s -> %s\n", from.Format(timeFormat), to.Format(timeFormat))
+	//fmt.Printf("%s -> %s\n", from.Format("Mon Jan 02 2006 3:04PM MST"),
+	//	to.Format("Mon Jan 02 2006 3:04PM MST"))
 
 	svc := calendarService()
 	events, err := svc.Events.List("primary").
@@ -132,6 +190,19 @@ func listEvents(fs *pflag.FlagSet, parse func() (args []string, usage func())) {
 	splits := strings.SplitN(events.Summary, "@", 2)
 	owner := splits[0]
 	domain := splits[1]
+
+	tw := tablewriter.NewWriter(os.Stdout)
+	tw.SetAlignment(tablewriter.ALIGN_LEFT)
+	tw.SetAutoWrapText(false)
+	tw.SetCenterSeparator("")
+	tw.SetColumnSeparator("")
+	tw.SetRowSeparator("")
+	tw.SetHeaderLine(false)
+	tw.SetBorder(false)
+	tw.SetTablePadding(" ")
+	tw.SetNoWhiteSpace(true)
+
+	var currentDay string
 
 	for _, item := range events.Items {
 		if item.Start.Date != "" { // || item.EventType != "default"
@@ -156,10 +227,35 @@ func listEvents(fs *pflag.FlagSet, parse func() (args []string, usage func())) {
 			}
 		}
 
-		names := attendeeNames(owner, domain, item.Attendees)
-		fmt.Printf("%s (%d:%02d): %s %s: %s\n", start.Format("Mon Jan 02 3:04PM"), minutes/60,
-			minutes%60, owner, strings.Join(names, " "), item.Summary)
-		//attendee.ResponseStatus
+		day := start.Format("Mon Jan 02")
+		if day != currentDay {
+			if currentDay != "" {
+				tw.Render()
+				tw.ClearRows()
+				fmt.Println()
+				fmt.Println(day)
+			} else {
+				fmt.Println(start.Format("Mon Jan 02 2006 MST"))
+			}
+
+			currentDay = day
+		}
+
+		organizer, names := attendeeNames(domain, item.Attendees)
+		if len(organizer) > 12 {
+			organizer = ""
+		}
+
+		tw.Append([]string{
+			start.Format("3:04PM"),
+			fmt.Sprintf("%d:%02d", minutes/60, minutes%60),
+			organizer,
+			formatParticipants(owner, names, 25),
+			truncate(item.Summary, 45),
+		})
+
+		// attendee.ResponseStatus
 		// item.RecurringEventId
 	}
+	tw.Render()
 }
